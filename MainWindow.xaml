@@ -1,0 +1,135 @@
+<Window x:Class="WinCapRecorder.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctrl="clr-namespace:WinCapRecorder.Controls"
+        Title="WinCapRecorder" Height="700" Width="480"
+        MinHeight="560" MinWidth="440"
+        Background="{StaticResource BgBrush}"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        Closing="Window_Closing">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Title -->
+        <TextBlock Grid.Row="0" Text="WinCapRecorder" FontSize="22" FontWeight="Bold"
+                   Foreground="{StaticResource TextBrush}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="0" Text="특정 창만 골라 녹화 · 창별 소리 녹화" FontSize="12"
+                   Foreground="{StaticResource SubTextBrush}" Margin="0,28,0,0"/>
+
+        <!-- Window selection -->
+        <StackPanel Grid.Row="1" Margin="0,20,0,0">
+            <TextBlock Text="녹화할 창 선택" Foreground="{StaticResource SubTextBrush}" FontSize="12" Margin="0,0,0,6"/>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <ComboBox x:Name="WindowComboBox" Grid.Column="0" Height="34" FontSize="13"
+                          DisplayMemberPath="Title" Margin="0,0,8,0"
+                          MaxDropDownHeight="480"
+                          ScrollViewer.VerticalScrollBarVisibility="Auto"
+                          ScrollViewer.CanContentScroll="True"/>
+                <Button Grid.Column="1" Content="새로고침" Click="RefreshWindows_Click" Width="80"/>
+            </Grid>
+        </StackPanel>
+
+        <!-- Audio toggle -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,14,0,0">
+            <CheckBox x:Name="AudioCheckBox" Content="이 창의 소리도 녹화" Foreground="{StaticResource TextBrush}"
+                      FontSize="13" VerticalContentAlignment="Center" Checked="AudioCheckBox_Changed" Unchecked="AudioCheckBox_Changed"/>
+        </StackPanel>
+
+        <!-- Status / timer -->
+        <Border Grid.Row="3" Background="{StaticResource PanelBrush}" CornerRadius="10" Margin="0,16,0,0" Padding="16">
+            <StackPanel HorizontalAlignment="Center">
+                <TextBlock x:Name="StatusText" Text="대기 중" FontSize="14" Foreground="{StaticResource TextBrush}" HorizontalAlignment="Center"/>
+                <TextBlock x:Name="TimerText" Text="00:00:00" FontSize="30" FontWeight="Bold" Foreground="{StaticResource AccentBrush}"
+                           HorizontalAlignment="Center" Margin="0,6,0,0"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Controls -->
+        <Grid Grid.Row="4" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="StartButton" Grid.Column="0" Content="● 녹화 시작" Height="42" Background="{StaticResource AccentBrush}" Click="StartButton_Click"/>
+            <Button x:Name="PauseButton" Grid.Column="2" Content="❚❚ 일시정지" Height="42" IsEnabled="False" Click="PauseButton_Click"/>
+            <Button x:Name="StopButton" Grid.Column="4" Content="■ 정지" Height="42" Background="{StaticResource AccentRedBrush}" IsEnabled="False" Click="StopButton_Click"/>
+        </Grid>
+
+        <!-- Hotkeys panel -->
+        <Border Grid.Row="5" Background="{StaticResource PanelBrush}" CornerRadius="10" Margin="0,20,0,0" Padding="16" VerticalAlignment="Top">
+            <StackPanel>
+                <TextBlock Text="전역 단축키 (다른 창에서도 동작)" FontSize="13" FontWeight="Bold" Foreground="{StaticResource TextBrush}" Margin="0,0,0,12"/>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="녹화 시작" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13" TextWrapping="Wrap" Margin="0,0,8,0"/>
+                    <ctrl:HotkeyBox x:Name="HkStart" Grid.Column="1"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="정지" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13" TextWrapping="Wrap" Margin="0,0,8,0"/>
+                    <ctrl:HotkeyBox x:Name="HkStop" Grid.Column="1"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="일시정지 / 이어서 녹화" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13" TextWrapping="Wrap" Margin="0,0,8,0"/>
+                    <ctrl:HotkeyBox x:Name="HkPauseResume" Grid.Column="1"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="소리 녹화 토글" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13" TextWrapping="Wrap" Margin="0,0,8,0"/>
+                    <ctrl:HotkeyBox x:Name="HkToggleAudio" Grid.Column="1"/>
+                </Grid>
+
+                <TextBlock Text="※ 녹화 중에는 대상 창을 바꿀 수 없습니다. 단축키는 입력 즉시 저장됩니다." FontSize="11"
+                           Foreground="{StaticResource SubTextBrush}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Output folder -->
+        <Grid Grid.Row="6" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="OutputFolderText" Grid.Column="0" Foreground="{StaticResource SubTextBrush}" FontSize="11"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,8,0"/>
+            <Button Grid.Column="1" Content="폴더 변경" Click="ChangeFolder_Click" Padding="10,4" Margin="0,0,6,0"/>
+            <Button Grid.Column="2" Content="폴더 열기" Click="OpenFolder_Click" Padding="10,4"/>
+        </Grid>
+    </Grid>
+    </ScrollViewer>
+</Window>
