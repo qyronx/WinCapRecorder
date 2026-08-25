@@ -336,7 +336,7 @@ namespace WinCapRecorder.Encode
         // Safe encoder path: receives an owned CPU BGRA frame. No D3D11 object is
         // accessed from the encoder thread. This is intentionally separate from the
         // legacy GPU readback method below.
-        public void WriteVideoFrame(byte[] bgra, int srcWidth, int srcHeight)
+        public void WriteVideoFrame(byte[] bgra, int srcWidth, int srcHeight, long timestampHns = -1)
         {
             if (!_started || _writer == null || bgra == null || bgra.Length == 0)
                 return;
@@ -380,10 +380,15 @@ namespace WinCapRecorder.Encode
                     try
                     {
                         ThrowIfFailed(sample.AddBuffer(buffer), "AddBuffer(video)");
-                        ThrowIfFailed(sample.SetSampleTime(_videoTimestamp), "SetSampleTime(video)");
+                        // Prefer capture-time timestamp so A/V share one wall clock.
+                        // Keep monotonic per stream (MF requirement).
+                        long vTime = timestampHns >= 0 ? timestampHns : _videoTimestamp;
+                        if (vTime < _videoTimestamp)
+                            vTime = _videoTimestamp;
+                        ThrowIfFailed(sample.SetSampleTime(vTime), "SetSampleTime(video)");
                         ThrowIfFailed(sample.SetSampleDuration(_videoFrameDuration), "SetSampleDuration(video)");
                         ThrowIfFailed(_writer.WriteSample(_videoStreamIndex, sample), "WriteSample(video)");
-                        _videoTimestamp += _videoFrameDuration;
+                        _videoTimestamp = vTime + _videoFrameDuration;
                     }
                     finally
                     {
@@ -397,51 +402,128 @@ namespace WinCapRecorder.Encode
             }
         }
 
+        /// <summary>
+        /// Convert BGRA to NV12 at a fixed encoder size.
+        /// Source is scaled to FIT the destination while preserving aspect ratio
+        /// (letterbox / pillarbox with black bars). Stretch was avoided because
+        /// window resizes would otherwise distort the picture.
+        /// </summary>
         private static byte[] BgraToNv12(byte[] bgra, int srcWidth, int srcHeight, int dstWidth, int dstHeight)
         {
             int dstYSize = checked(dstWidth * dstHeight);
             byte[] nv12 = new byte[checked(dstYSize + dstYSize / 2)];
+            // Black in limited-range Y = 16, neutral chroma = 128
+            for (int i = 0; i < dstYSize; i++)
+                nv12[i] = 16;
+            for (int i = dstYSize; i < nv12.Length; i++)
+                nv12[i] = 128;
 
-            int copyWidth = Math.Min(srcWidth, dstWidth);
-            int copyHeight = Math.Min(srcHeight, dstHeight);
+            if (srcWidth <= 0 || srcHeight <= 0 || dstWidth <= 0 || dstHeight <= 0)
+                return nv12;
+
             int srcStride = checked(srcWidth * 4);
             int uvBase = dstYSize;
 
-            // BT.601 limited-range conversion. NV12 is the native input format
-            // expected by the Windows H.264 encoder on typical Windows systems.
-            for (int y = 0; y < copyHeight; y++)
+            // Fit (contain): scale uniformly so the whole source is visible.
+            long scaleNum = Math.Min(
+                (long)dstWidth * srcHeight,
+                (long)dstHeight * srcWidth);
+            // scale = min(dstW/srcW, dstH/srcH) applied in integer form:
+            // outW = srcW * min(dstW/srcW, dstH/srcH) = min(dstW, srcW*dstH/srcH)
+            int outW = (int)Math.Min(dstWidth, (long)srcWidth * dstHeight / srcHeight);
+            int outH = (int)Math.Min(dstHeight, (long)srcHeight * dstWidth / srcWidth);
+            if (outW < 1) outW = 1;
+            if (outH < 1) outH = 1;
+            // Keep even for NV12 chroma alignment.
+            outW -= outW % 2;
+            outH -= outH % 2;
+            if (outW < 2) outW = 2;
+            if (outH < 2) outH = 2;
+            if (outW > dstWidth) outW = dstWidth - (dstWidth % 2);
+            if (outH > dstHeight) outH = dstHeight - (dstHeight % 2);
+
+            int offX = (dstWidth - outW) / 2;
+            int offY = (dstHeight - outH) / 2;
+            offX -= offX % 2;
+            offY -= offY % 2;
+
+            // Fast path: same size and no letterbox needed.
+            if (srcWidth == dstWidth && srcHeight == dstHeight && offX == 0 && offY == 0)
             {
-                int srcRow = y * srcStride;
-                int dstRow = y * dstWidth;
-                for (int x = 0; x < copyWidth; x++)
+                for (int y = 0; y < dstHeight; y++)
                 {
-                    int p = srcRow + x * 4;
-                    int b = bgra[p];
-                    int g = bgra[p + 1];
-                    int r = bgra[p + 2];
+                    int srcRow = y * srcStride;
+                    int dstRow = y * dstWidth;
+                    for (int x = 0; x < dstWidth; x++)
+                    {
+                        int p = srcRow + x * 4;
+                        int b = bgra[p], g = bgra[p + 1], r = bgra[p + 2];
+                        nv12[dstRow + x] = ClampByte(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+                    }
+                }
+                for (int y = 0; y < dstHeight; y += 2)
+                {
+                    int uvRow = (y / 2) * dstWidth;
+                    int srcRow0 = y * srcStride;
+                    int srcRow1 = Math.Min(y + 1, dstHeight - 1) * srcStride;
+                    for (int x = 0; x < dstWidth; x += 2)
+                    {
+                        int x1 = Math.Min(x + 1, dstWidth - 1);
+                        int p00 = srcRow0 + x * 4, p01 = srcRow0 + x1 * 4;
+                        int p10 = srcRow1 + x * 4, p11 = srcRow1 + x1 * 4;
+                        int b = (bgra[p00] + bgra[p01] + bgra[p10] + bgra[p11]) / 4;
+                        int g = (bgra[p00 + 1] + bgra[p01 + 1] + bgra[p10 + 1] + bgra[p11 + 1]) / 4;
+                        int r = (bgra[p00 + 2] + bgra[p01 + 2] + bgra[p10 + 2] + bgra[p11 + 2]) / 4;
+                        int uv = uvBase + uvRow + x;
+                        nv12[uv] = ClampByte(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+                        nv12[uv + 1] = ClampByte(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+                    }
+                }
+                return nv12;
+            }
+
+            // Y plane — scaled into the letterboxed rectangle.
+            for (int y = 0; y < outH; y++)
+            {
+                int srcY = (int)((long)y * srcHeight / outH);
+                if (srcY >= srcHeight) srcY = srcHeight - 1;
+                int srcRow = srcY * srcStride;
+                int dstRow = (y + offY) * dstWidth + offX;
+                for (int x = 0; x < outW; x++)
+                {
+                    int srcX = (int)((long)x * srcWidth / outW);
+                    if (srcX >= srcWidth) srcX = srcWidth - 1;
+                    int p = srcRow + srcX * 4;
+                    int b = bgra[p], g = bgra[p + 1], r = bgra[p + 2];
                     nv12[dstRow + x] = ClampByte(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
                 }
             }
 
-            // 2x2 chroma subsampling.
-            for (int y = 0; y < copyHeight; y += 2)
+            // UV plane — same rectangle, 2x2 subsampled.
+            for (int y = 0; y < outH; y += 2)
             {
-                int uvRow = (y / 2) * dstWidth;
-                int srcRow0 = y * srcStride;
-                int srcRow1 = Math.Min(y + 1, copyHeight - 1) * srcStride;
-                for (int x = 0; x < copyWidth; x += 2)
-                {
-                    int x1 = Math.Min(x + 1, copyWidth - 1);
-                    int p00 = srcRow0 + x * 4;
-                    int p01 = srcRow0 + x1 * 4;
-                    int p10 = srcRow1 + x * 4;
-                    int p11 = srcRow1 + x1 * 4;
+                int srcY0 = (int)((long)y * srcHeight / outH);
+                int srcY1 = (int)((long)Math.Min(y + 1, outH - 1) * srcHeight / outH);
+                if (srcY0 >= srcHeight) srcY0 = srcHeight - 1;
+                if (srcY1 >= srcHeight) srcY1 = srcHeight - 1;
+                int srcRow0 = srcY0 * srcStride;
+                int srcRow1 = srcY1 * srcStride;
+                int uvRow = ((y + offY) / 2) * dstWidth;
 
+                for (int x = 0; x < outW; x += 2)
+                {
+                    int srcX0 = (int)((long)x * srcWidth / outW);
+                    int srcX1 = (int)((long)Math.Min(x + 1, outW - 1) * srcWidth / outW);
+                    if (srcX0 >= srcWidth) srcX0 = srcWidth - 1;
+                    if (srcX1 >= srcWidth) srcX1 = srcWidth - 1;
+
+                    int p00 = srcRow0 + srcX0 * 4, p01 = srcRow0 + srcX1 * 4;
+                    int p10 = srcRow1 + srcX0 * 4, p11 = srcRow1 + srcX1 * 4;
                     int b = (bgra[p00] + bgra[p01] + bgra[p10] + bgra[p11]) / 4;
                     int g = (bgra[p00 + 1] + bgra[p01 + 1] + bgra[p10 + 1] + bgra[p11 + 1]) / 4;
                     int r = (bgra[p00 + 2] + bgra[p01 + 2] + bgra[p10 + 2] + bgra[p11 + 2]) / 4;
 
-                    int uv = uvBase + uvRow + x;
+                    int uv = uvBase + uvRow + (x + offX);
                     nv12[uv] = ClampByte(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
                     nv12[uv + 1] = ClampByte(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
                 }
@@ -534,7 +616,7 @@ namespace WinCapRecorder.Encode
             }
         }
 
-        public void WriteAudioSamples(byte[] pcmData)
+        public void WriteAudioSamples(byte[] pcmData, long timestampHns = -1)
         {
             if (!_started || _writer == null || !HasAudio || pcmData == null || pcmData.Length == 0)
                 return;
@@ -571,10 +653,13 @@ namespace WinCapRecorder.Encode
 
                     ThrowIfFailed(MFCreateSample(out sample), "MFCreateSample(audio)");
                     ThrowIfFailed(sample.AddBuffer(buffer), "AddBuffer(audio)");
-                    ThrowIfFailed(sample.SetSampleTime(_audioTimestamp), "SetSampleTime(audio)");
+                    long aTime = timestampHns >= 0 ? timestampHns : _audioTimestamp;
+                    if (aTime < _audioTimestamp)
+                        aTime = _audioTimestamp;
+                    ThrowIfFailed(sample.SetSampleTime(aTime), "SetSampleTime(audio)");
                     ThrowIfFailed(sample.SetSampleDuration(durationHns), "SetSampleDuration(audio)");
                     ThrowIfFailed(_writer.WriteSample(_audioStreamIndex, sample), "WriteSample(audio)");
-                    _audioTimestamp += durationHns;
+                    _audioTimestamp = aTime + durationHns;
                 }
                 finally
                 {

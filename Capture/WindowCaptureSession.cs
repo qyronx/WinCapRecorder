@@ -133,6 +133,8 @@ namespace WinCapRecorder.Capture
                 // (NOT Marshal.GetIUnknownForObject — that path throws E_NOINTERFACE).
                 IntPtr nativeTex = D3D11Helper.GetNativeTexturePointer(frame.Surface);
                 byte[] bgra;
+                int cropW = 0, cropH = 0;
+                SizeInt32 rawContentSize = contentSize;
                 ID3D11Texture2D? source = null;
                 try
                 {
@@ -161,8 +163,10 @@ namespace WinCapRecorder.Capture
 
                     var full = ReadbackToCpu(source, texW, texH);
 
-                    int cropW = Math.Min(contentSize.Width, texW);
-                    int cropH = Math.Min(contentSize.Height, texH);
+                    // Pixels available on THIS frame's surface (may still be the
+                    // previous pool size right after a resize).
+                    cropW = Math.Min(contentSize.Width, texW);
+                    cropH = Math.Min(contentSize.Height, texH);
                     if (cropW <= 0 || cropH <= 0)
                         return;
 
@@ -171,7 +175,12 @@ namespace WinCapRecorder.Capture
                     else
                         bgra = CropBgra(full, texW, texH, cropW, cropH);
 
-                    contentSize = new SizeInt32 { Width = cropW, Height = cropH };
+                    // Keep the RAW content size for pool Recreate. Previously we
+                    // overwrote contentSize with cropW/cropH, so when the window
+                    // GREW (content > texture) the change looked identical to
+                    // _lastSize and Recreate never ran — only the first shrink
+                    // worked; later resizes broke aspect ratio.
+                    rawContentSize = contentSize;
                 }
                 finally
                 {
@@ -184,28 +193,45 @@ namespace WinCapRecorder.Capture
 
                 // Only after the current frame's surface has been completely
                 // copied and released is it safe to recreate the frame pool.
-                if (contentSize.Width != _lastSize.Width ||
-                    contentSize.Height != _lastSize.Height)
+                // Compare against the true window content size, not the cropped
+                // pixel buffer size.
+                if (rawContentSize.Width != _lastSize.Width ||
+                    rawContentSize.Height != _lastSize.Height)
                 {
-                    _lastSize = contentSize;
-                    Width = contentSize.Width;
-                    Height = contentSize.Height;
+                    _lastSize = rawContentSize;
+                    Width = rawContentSize.Width;
+                    Height = rawContentSize.Height;
 
-                    sender.Recreate(
-                        _winrtDevice!,
-                        DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                        2,
-                        contentSize);
+                    try
+                    {
+                        sender.Recreate(
+                            _winrtDevice!,
+                            DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                            2,
+                            rawContentSize);
+                    }
+                    catch (Exception recEx)
+                    {
+                        try
+                        {
+                            System.IO.File.AppendAllText(
+                                System.IO.Path.Combine(AppContext.BaseDirectory, "crash.log"),
+                                $"[{DateTime.Now:O}] WGC_RECREATE {rawContentSize.Width}x{rawContentSize.Height}: {recEx}");
+                        }
+                        catch { }
+                    }
                 }
 
                     CheckForBlankFrame(bgra);
 
+                    // Emit the pixels we actually have this frame (cropW x cropH).
+                    // Encoder letterboxes them into the fixed output resolution.
                     FrameArrived?.Invoke(
                         this,
                         new FrameArrivedEventArgs(
                             bgra,
-                            contentSize.Width,
-                            contentSize.Height));
+                            cropW,
+                            cropH));
                 }
             }
             catch (Exception ex)

@@ -50,20 +50,23 @@ namespace WinCapRecorder
             public byte[] Data { get; }
             public int Width { get; }
             public int Height { get; }
+            /// <summary>Capture-time timeline in 100-ns units (shared A/V clock).</summary>
+            public long TimestampHns { get; }
 
-            private EncoderItem(EncoderItemKind kind, byte[] data, int width, int height)
+            private EncoderItem(EncoderItemKind kind, byte[] data, int width, int height, long timestampHns)
             {
                 Kind = kind;
                 Data = data;
                 Width = width;
                 Height = height;
+                TimestampHns = timestampHns;
             }
 
-            public static EncoderItem Video(byte[] data, int width, int height) =>
-                new(EncoderItemKind.Video, data, width, height);
+            public static EncoderItem Video(byte[] data, int width, int height, long timestampHns) =>
+                new(EncoderItemKind.Video, data, width, height, timestampHns);
 
-            public static EncoderItem Audio(byte[] data) =>
-                new(EncoderItemKind.Audio, data, 0, 0);
+            public static EncoderItem Audio(byte[] data, long timestampHns) =>
+                new(EncoderItemKind.Audio, data, 0, 0, timestampHns);
         }
 
         public Task<bool> StartAsync(IntPtr targetHwnd, uint targetPid, string outputDirectory) =>
@@ -235,9 +238,9 @@ namespace WinCapRecorder
                         throw new InvalidOperationException("Media Foundation writer가 없습니다.");
 
                     if (item.Kind == EncoderItemKind.Video)
-                        _writer.WriteVideoFrame(item.Data, item.Width, item.Height);
+                        _writer.WriteVideoFrame(item.Data, item.Width, item.Height, item.TimestampHns);
                     else
-                        _writer.WriteAudioSamples(item.Data);
+                        _writer.WriteAudioSamples(item.Data, item.TimestampHns);
                 }
                 catch (Exception ex)
                 {
@@ -278,7 +281,7 @@ namespace WinCapRecorder
 
         private void OnFrameArrived(object? sender, FrameArrivedEventArgs e)
         {
-            if (State != RecordingState.Recording || _encoderFaulted)
+            if (State != RecordingState.Recording || _encoderFaulted || _stopInProgress != 0)
                 return;
 
             lock (_queueLock)
@@ -308,7 +311,7 @@ namespace WinCapRecorder
                         return;
                 }
 
-                _encoderQueue.Enqueue(EncoderItem.Video(e.Bgra, e.Width, e.Height));
+                _encoderQueue.Enqueue(EncoderItem.Video(e.Bgra, e.Width, e.Height, GetCaptureTimestampHns()));
             }
 
             _encoderSignal.Set();
@@ -335,9 +338,8 @@ namespace WinCapRecorder
 
         private void OnAudioData(object? sender, byte[] data)
         {
-            if (State != RecordingState.Recording || _encoderFaulted || data.Length == 0)
+            if (State != RecordingState.Recording || _encoderFaulted || data.Length == 0 || _stopInProgress != 0)
                 return;
-            // Drop immediately when muted — do not enqueue (avoids multi-second queue lag).
             if (!_audioOutputEnabled)
                 return;
 
@@ -369,7 +371,7 @@ namespace WinCapRecorder
 
                 var copy = new byte[data.Length];
                 Buffer.BlockCopy(data, 0, copy, 0, data.Length);
-                _encoderQueue.Enqueue(EncoderItem.Audio(copy));
+                _encoderQueue.Enqueue(EncoderItem.Audio(copy, GetCaptureTimestampHns()));
             }
 
             _encoderSignal.Set();
@@ -430,6 +432,17 @@ namespace WinCapRecorder
             }
         }
 
+        /// <summary>
+        /// Shared recording clock in Media Foundation units (100 ns).
+        /// Uses Elapsed so pause freezes both video and audio timelines together.
+        /// </summary>
+        private long GetCaptureTimestampHns()
+        {
+            // TimeSpan.Ticks is already 100-nanosecond units.
+            long t = Elapsed.Elapsed.Ticks;
+            return t < 0 ? 0 : t;
+        }
+
         public void Pause()
         {
             if (State != RecordingState.Recording) return;
@@ -465,9 +478,12 @@ namespace WinCapRecorder
                 if (State == RecordingState.Idle && _writer == null && _capture == null)
                     return null;
 
+                // 1) Freeze the timeline immediately — no more samples accepted.
                 State = RecordingState.Idle;
                 Elapsed.Stop();
+                _audioOutputEnabled = false;
 
+                // 2) Detach producers so callbacks cannot enqueue anything new.
                 if (_capture != null)
                 {
                     _capture.FrameArrived -= OnFrameArrived;
@@ -480,15 +496,23 @@ namespace WinCapRecorder
                     _audioCapture.AudioWarning -= OnAudioWarning;
                 }
 
-                // No new producer callbacks after these calls. Capture/Audio stop
-                // waits for callbacks to leave, then the encoder queue is drained.
-                try { _capture?.Stop(); } catch (Exception ex) { LogBackgroundError("CAPTURE_STOP", ex); }
-                try { _audioCapture?.Stop(); } catch (Exception ex) { LogBackgroundError("AUDIO_STOP", ex); }
-
+                // 3) CRITICAL: drop the entire encoder queue NOW.
+                //    Previously the worker kept draining residual audio packets for
+                //    seconds after the last video frame, so the file had trailing sound
+                //    after the picture already ended. User wants stop = hard cut.
                 lock (_queueLock)
+                {
+                    _encoderQueue.Clear();
                     _workerRunning = false;
+                }
                 _encoderSignal.Set();
 
+                // 4) Stop capture devices (may block briefly). Queue is already empty
+                //    so the encoder thread will not write anything further.
+                try { _audioCapture?.Stop(); } catch (Exception ex) { LogBackgroundError("AUDIO_STOP", ex); }
+                try { _capture?.Stop(); } catch (Exception ex) { LogBackgroundError("CAPTURE_STOP", ex); }
+
+                // 5) Wait for the encoder thread to FinalizeWriting + release.
                 if (_encoderWorker != null && _encoderWorker != Thread.CurrentThread)
                     _encoderWorker.Join(15000);
 
@@ -500,7 +524,6 @@ namespace WinCapRecorder
 
                 string? path = CurrentOutputPath;
 
-                // Writer has already been finalized and released by its own worker.
                 try { _capture?.Dispose(); } catch { }
                 try { _audioCapture?.Dispose(); } catch { }
                 _capture = null;
@@ -550,7 +573,10 @@ namespace WinCapRecorder
             try { _audioCapture?.Stop(); } catch { }
 
             lock (_queueLock)
+            {
+                _encoderQueue.Clear();
                 _workerRunning = false;
+            }
             _encoderSignal.Set();
             try { _encoderWorker?.Join(15000); } catch { }
             _encoderWorker = null;
