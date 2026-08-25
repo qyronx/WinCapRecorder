@@ -170,11 +170,15 @@ namespace WinCapRecorder
                             : "단축키: 녹화 재개";
                         break;
                     case "ToggleAudio":
-                        AudioCheckBox.IsChecked = !(AudioCheckBox.IsChecked ?? false);
-                        StatusText.Text = (AudioCheckBox.IsChecked == true)
-                            ? "단축키: 소리 녹화 ON"
-                            : "단축키: 소리 녹화 OFF";
+                    {
+                        bool next = !(AudioCheckBox.IsChecked ?? false);
+                        AudioCheckBox.IsChecked = next;
+                        // Apply directly as well (Checked event also fires) so mid-recording
+                        // toggle never depends on event ordering alone.
+                        _controller.SetAudioCaptureEnabled(next);
+                        StatusText.Text = next ? "단축키: 소리 녹화 ON" : "단축키: 소리 녹화 OFF";
                         break;
+                    }
                     default:
                         StatusText.Text = "단축키: 알 수 없는 동작 " + action;
                         break;
@@ -216,7 +220,7 @@ namespace WinCapRecorder
         {
             bool on = AudioCheckBox.IsChecked ?? false;
             _settings.AudioEnabled = on;
-            // Apply immediately to the live session (purges queued audio — no lag).
+            // Live session: mute/unmute immediately. Preference also used on next Start.
             _controller.SetAudioCaptureEnabled(on);
             try { _settings.Save(); } catch { }
         }

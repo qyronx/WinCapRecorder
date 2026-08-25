@@ -116,18 +116,17 @@ namespace WinCapRecorder
                 if (!_capture.Start(targetHwnd))
                     throw new InvalidOperationException("이 창은 캡처할 수 없습니다. 다른 창을 선택해주세요.");
 
+                // Always open process-loopback + AAC when the OS supports it, so the
+                // user can toggle sound any number of times mid-recording.
+                // Mute is implemented by writing silence (not stopping WASAPI).
                 bool audioOk = false;
-                if (AudioEnabled)
+                _audioCapture = new ProcessLoopbackCapture();
+                audioOk = _audioCapture.Start(targetPid);
+                if (!audioOk)
                 {
-                    _audioCapture = new ProcessLoopbackCapture();
-                    audioOk = _audioCapture.Start(targetPid);
-
-                    if (!audioOk)
-                    {
-                        _audioCapture.Dispose();
-                        _audioCapture = null;
-                        StatusChanged?.Invoke(this, "소리 캡처를 사용할 수 없어 영상만 녹화합니다.");
-                    }
+                    try { _audioCapture.Dispose(); } catch { }
+                    _audioCapture = null;
+                    StatusChanged?.Invoke(this, "소리 캡처를 사용할 수 없어 영상만 녹화합니다.");
                 }
 
                 _writerAudioEnabled = audioOk;
@@ -340,7 +339,8 @@ namespace WinCapRecorder
         {
             if (State != RecordingState.Recording || _encoderFaulted || data.Length == 0 || _stopInProgress != 0)
                 return;
-            if (!_audioOutputEnabled)
+            // No audio track in this session.
+            if (!_writerAudioEnabled)
                 return;
 
             lock (_queueLock)
@@ -369,9 +369,20 @@ namespace WinCapRecorder
                         return;
                 }
 
-                var copy = new byte[data.Length];
-                Buffer.BlockCopy(data, 0, copy, 0, data.Length);
-                _encoderQueue.Enqueue(EncoderItem.Audio(copy, GetCaptureTimestampHns()));
+                byte[] payload;
+                if (_audioOutputEnabled)
+                {
+                    payload = new byte[data.Length];
+                    Buffer.BlockCopy(data, 0, payload, 0, data.Length);
+                }
+                else
+                {
+                    // Muted: write silence of the same duration so the AAC timeline
+                    // stays continuous and toggle on/off is precise in the file.
+                    payload = new byte[data.Length];
+                }
+
+                _encoderQueue.Enqueue(EncoderItem.Audio(payload, GetCaptureTimestampHns()));
             }
 
             _encoderSignal.Set();
@@ -397,22 +408,28 @@ namespace WinCapRecorder
         {
             AudioEnabled = enabled;
 
-            if (!_writerAudioEnabled)
+            // Preference for next Start when idle.
+            if (State == RecordingState.Idle)
+                return;
+
+            if (!_writerAudioEnabled || _audioCapture == null)
             {
-                // Writer was created without an AAC stream — cannot add audio mid-file.
                 _audioOutputEnabled = false;
                 if (enabled)
-                    StatusChanged?.Invoke(this, "이 녹화는 소리 없이 시작되어 중간에 켤 수 없습니다.");
+                    StatusChanged?.Invoke(this, "이 세션은 소리 캡처를 사용할 수 없습니다.");
                 return;
             }
 
+            bool wasEnabled = _audioOutputEnabled;
             _audioOutputEnabled = enabled;
 
-            // Stop feeding WASAPI packets into the pipeline when muted.
-            try { _audioCapture?.SetPaused(!enabled); } catch { }
-
-            if (!enabled)
+            // Do NOT pause WASAPI for mute — multiple pause/resume cycles were
+            // unreliable. Mute = write silence; unmute = write real PCM.
+            // When turning OFF, drop already-queued real audio so mute is instant.
+            if (wasEnabled && !enabled)
                 PurgeQueuedAudio();
+
+            StatusChanged?.Invoke(this, enabled ? "소리 녹화 ON" : "소리 녹화 OFF");
         }
 
         private void PurgeQueuedAudio()
@@ -456,8 +473,8 @@ namespace WinCapRecorder
         {
             if (State != RecordingState.Paused) return;
             State = RecordingState.Recording;
-            // Only unpause WASAPI if audio output is currently enabled.
-            _audioCapture?.SetPaused(!_audioOutputEnabled);
+            // Resume WASAPI capture; mute is handled by writing silence in OnAudioData.
+            _audioCapture?.SetPaused(false);
             Elapsed.Start();
             StatusChanged?.Invoke(this, "녹화 재개");
         }
