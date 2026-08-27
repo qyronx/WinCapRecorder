@@ -35,10 +35,18 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <ComboBox x:Name="WindowComboBox" Grid.Column="0" Height="34" FontSize="13"
-                          DisplayMemberPath="Title" Margin="0,0,8,0"
-                          MaxDropDownHeight="480"
-                          ScrollViewer.VerticalScrollBarVisibility="Auto"
-                          ScrollViewer.CanContentScroll="True"/>
+                          DisplayMemberPath="DisplayName" Margin="0,0,8,0"
+                          MaxDropDownHeight="600"
+                          ScrollViewer.VerticalScrollBarVisibility="Visible"
+                          ScrollViewer.CanContentScroll="True"
+                          VirtualizingStackPanel.IsVirtualizing="True"
+                          VirtualizingStackPanel.VirtualizationMode="Recycling">
+                    <ComboBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <VirtualizingStackPanel />
+                        </ItemsPanelTemplate>
+                    </ComboBox.ItemsPanel>
+                </ComboBox>
                 <Button Grid.Column="1" Content="새로고침" Click="RefreshWindows_Click" Width="80"/>
             </Grid>
         </StackPanel>

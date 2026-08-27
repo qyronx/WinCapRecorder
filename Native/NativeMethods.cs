@@ -68,6 +68,7 @@ namespace WinCapRecorder.Native
         public const int GWL_EXSTYLE = -20;
         public const long WS_EX_TOOLWINDOW = 0x00000080;
         public const long WS_EX_APPWINDOW = 0x00040000;
+        public const uint GA_ROOT = 2;
         public const uint GA_ROOTOWNER = 3;
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
